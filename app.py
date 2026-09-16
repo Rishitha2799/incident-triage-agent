@@ -16,6 +16,17 @@ try:
 except Exception:
     pass
 
+def extract_text(content) -> str:
+    """Safely extracts a flat string whether content is a str or a list of blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part["text"] if isinstance(part, dict) and "text" in part else str(part)
+            for part in content
+        )
+    return str(content or "")
+
 from agent import get_agent_app
 
 fastapi_app = FastAPI(title="Autonomous Incident Agent API")
@@ -105,8 +116,7 @@ def run_triage(thread_id: str, message: str):
         )
         return status_msg, "AWAITING_APPROVAL"
 
-    return snapshot.values["messages"][-1].content, "COMPLETED"
-
+    return extract_text(snapshot.values["messages"][-1].content), "COMPLETED"
 def handle_decision(thread_id: str, decision: str, reason: str):
     if not thread_id.strip():
         return "Missing Thread ID.", ""
@@ -118,17 +128,19 @@ def handle_decision(thread_id: str, decision: str, reason: str):
         return "No pending sensitive action found for this Thread ID.", ""
 
     if decision == "Approve":
-        result = agent_executor.invoke(None, config=config)
-        return f"**Approved and executed:**\n\n{result['messages'][-1].content}", "RESOLVED"
-    else:
-        pending_call = snapshot.values["messages"][-1].tool_calls[0]
-        rejection_msg = ToolMessage(
-            tool_call_id=pending_call["id"],
-            content=f"Rejected by engineer: {reason or 'Denied'}"
-        )
-        agent_executor.update_state(config, {"messages": [rejection_msg]}, as_node="sensitive_tools")
-        result = agent_executor.invoke(None, config=config)
-        return f"**Action rejected:**\n\n{result['messages'][-1].content}", "REJECTED"
+    result = agent_executor.invoke(None, config=config)
+    content = extract_text(result["messages"][-1].content)
+    return f"**Approved and executed:**\n\n{content}", "RESOLVED"
+else:
+    pending_call = snapshot.values["messages"][-1].tool_calls[0]
+    rejection_msg = ToolMessage(
+        tool_call_id=pending_call["id"],
+        content=f"Rejected by engineer: {reason or 'Denied'}"
+    )
+    agent_executor.update_state(config, {"messages": [rejection_msg]}, as_node="sensitive_tools")
+    result = agent_executor.invoke(None, config=config)
+    content = extract_text(result["messages"][-1].content)
+    return f"**Action rejected:**\n\n{content}", "REJECTED"
 
 # --- GRADIO UI LAYOUT ---
 with gr.Blocks(title="Autonomous Incident Triage Agent") as demo:
