@@ -5,16 +5,22 @@ from pydantic import BaseModel
 from langchain_core.messages import HumanMessage, ToolMessage
 import gradio as gr
 
-try:
-    import spaces
+from agent import get_agent_app
 
-    @spaces.GPU
-    def dummy_gpu_init():
-        return True
+fastapi_app = FastAPI(title="Autonomous Incident Agent API")
+agent_executor = get_agent_app()
 
-    dummy_gpu_init()
-except Exception:
-    pass
+
+class PromptRequest(BaseModel):
+    thread_id: str
+    message: str
+
+
+class ApprovalRequest(BaseModel):
+    thread_id: str
+    approved: bool
+    rejection_reason: str | None = None
+
 
 def extract_text(content) -> str:
     """Safely extracts a flat string whether content is a str or a list of blocks."""
@@ -27,21 +33,9 @@ def extract_text(content) -> str:
         )
     return str(content or "")
 
-from agent import get_agent_app
-
-fastapi_app = FastAPI(title="Autonomous Incident Agent API")
-agent_executor = get_agent_app()
-
-class PromptRequest(BaseModel):
-    thread_id: str
-    message: str
-
-class ApprovalRequest(BaseModel):
-    thread_id: str
-    approved: bool
-    rejection_reason: str | None = None
 
 # --- FASTAPI REST ENDPOINTS ---
+
 @fastapi_app.post("/chat")
 async def chat_handler(request: PromptRequest):
     config = {"configurable": {"thread_id": request.thread_id}}
@@ -63,8 +57,9 @@ async def chat_handler(request: PromptRequest):
     return {
         "thread_id": request.thread_id,
         "status": "COMPLETED",
-        "response": snapshot.values["messages"][-1].content
+        "response": extract_text(snapshot.values["messages"][-1].content)
     }
+
 
 @fastapi_app.post("/approve")
 async def approve_handler(request: ApprovalRequest):
@@ -79,7 +74,7 @@ async def approve_handler(request: ApprovalRequest):
         return {
             "thread_id": request.thread_id,
             "status": "RESOLVED",
-            "response": result["messages"][-1].content
+            "response": extract_text(result["messages"][-1].content)
         }
     else:
         pending_call = snapshot.values["messages"][-1].tool_calls[0]
@@ -92,10 +87,12 @@ async def approve_handler(request: ApprovalRequest):
         return {
             "thread_id": request.thread_id,
             "status": "REJECTED_AND_RESUMED",
-            "response": result["messages"][-1].content
+            "response": extract_text(result["messages"][-1].content)
         }
 
+
 # --- GRADIO INTERFACE LOGIC ---
+
 def run_triage(thread_id: str, message: str):
     if not thread_id.strip() or not message.strip():
         return "Please provide both a Thread ID and an Incident Description.", ""
@@ -117,6 +114,8 @@ def run_triage(thread_id: str, message: str):
         return status_msg, "AWAITING_APPROVAL"
 
     return extract_text(snapshot.values["messages"][-1].content), "COMPLETED"
+
+
 def handle_decision(thread_id: str, decision: str, reason: str):
     if not thread_id.strip():
         return "Missing Thread ID.", ""
@@ -128,21 +127,21 @@ def handle_decision(thread_id: str, decision: str, reason: str):
         return "No pending sensitive action found for this Thread ID.", ""
 
     if decision == "Approve":
-    result = agent_executor.invoke(None, config=config)
-    content = extract_text(result["messages"][-1].content)
-    return f"**Approved and executed:**\n\n{content}", "RESOLVED"
-else:
-    pending_call = snapshot.values["messages"][-1].tool_calls[0]
-    rejection_msg = ToolMessage(
-        tool_call_id=pending_call["id"],
-        content=f"Rejected by engineer: {reason or 'Denied'}"
-    )
-    agent_executor.update_state(config, {"messages": [rejection_msg]}, as_node="sensitive_tools")
-    result = agent_executor.invoke(None, config=config)
-    content = extract_text(result["messages"][-1].content)
-    return f"**Action rejected:**\n\n{content}", "REJECTED"
+        result = agent_executor.invoke(None, config=config)
+        return f"**Approved and executed:**\n\n{extract_text(result['messages'][-1].content)}", "RESOLVED"
+    else:
+        pending_call = snapshot.values["messages"][-1].tool_calls[0]
+        rejection_msg = ToolMessage(
+            tool_call_id=pending_call["id"],
+            content=f"Rejected by engineer: {reason or 'Denied'}"
+        )
+        agent_executor.update_state(config, {"messages": [rejection_msg]}, as_node="sensitive_tools")
+        result = agent_executor.invoke(None, config=config)
+        return f"**Action rejected:**\n\n{extract_text(result['messages'][-1].content)}", "REJECTED"
+
 
 # --- GRADIO UI LAYOUT ---
+
 with gr.Blocks(title="Autonomous Incident Triage Agent") as demo:
     gr.Markdown("# Autonomous Incident Triage Agent")
     gr.Markdown("Investigates alerts, queries pgvector runbooks, and halts before critical operations.")
@@ -186,4 +185,5 @@ with gr.Blocks(title="Autonomous Incident Triage Agent") as demo:
 app = gr.mount_gradio_app(fastapi_app, demo, path="/")
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 7860)))
