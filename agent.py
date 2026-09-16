@@ -70,7 +70,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-3.5-flash-lite",
     google_api_key=os.getenv("GEMINI_API_KEY"),
 ).bind_tools(all_tools)
 
